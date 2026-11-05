@@ -10,12 +10,14 @@
 
 pub mod account;
 mod fetch;
+pub mod follow;
 mod fx;
 mod item;
 pub mod mark;
 mod pose;
 pub mod prefs;
 pub mod preview;
+pub mod trail;
 
 pub use fetch::{BATCH, Clock, Cosmetics, Frame, Http, Local, Transport, Worn};
 pub use fx::{
