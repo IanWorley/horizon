@@ -36,11 +36,14 @@ const TOAST: Duration = Duration::from_secs(4);
 
 /// The slots a row each, with their names. Name tags have no model; launcher themes are free in
 /// Settings, not worn.
-const SLOTS: [(&str, &str); 5] = [
+const SLOTS: [(&str, &str); 8] = [
     ("head", "Head"),
     ("back", "Back"),
     ("torso", "Shirt"),
     ("shoulder", "Shoulder pet"),
+    ("companion", "Companion"),
+    ("trail", "Trail"),
+    ("aura", "Aura"),
     ("name_tag", "Name tag"),
 ];
 
@@ -693,12 +696,7 @@ impl Launcher {
             None => (&fallback, false),
         };
         let body = preview::player_model(slim);
-        let mut draws = vec![preview::Draw {
-            root: &body,
-            base: Default::default(),
-            texture,
-            poses: Vec::new(),
-        }];
+        let mut draws = vec![preview::Draw::model(&body, texture)];
         draws.extend(
             worn.iter()
                 .filter_map(|id| w.items.get(id))
@@ -707,7 +705,14 @@ impl Launcher {
         let (pw, ph) = ((W * scale) as u32, (H * scale) as u32);
         // Degrees: a little turned, then a quarter more per click.
         let yaw = 30. + 90. * f32::from(w.turn);
-        let image = preview::render(&draws, pw, ph, yaw, 10.);
+        // A companion floats beside the head, a trail falls behind and an aura spreads round the
+        // feet: the camera steps back to keep them in the picture.
+        let wide = worn
+            .iter()
+            .filter_map(|id| w.items.get(id))
+            .any(|i| i.companion.is_some() || i.trail.is_some() || i.aura.is_some());
+        let zoom = if wide { 0.72 } else { 1. };
+        let image = preview::render_zoomed(&draws, pw, ph, yaw, 10., zoom);
         let texels: Vec<[u8; 4]> = image.rgba.as_chunks::<4>().0.to_vec();
         let baked = art::bake(&texels, pw as usize, ph as usize, 1. / scale, scale);
         w.seen = Some((scale, w.turn, worn, baked.clone()));
