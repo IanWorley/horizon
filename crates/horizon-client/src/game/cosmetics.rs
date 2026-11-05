@@ -299,6 +299,8 @@ fn covered(m: &Mob, slot: Slot) -> bool {
             .as_deref()
             .is_some_and(|c| c != "minecraft:elytra"),
         Slot::NameTag => true,
+        // On no bone: drawn by a pass of their own, never on the body.
+        Slot::Companion | Slot::Trail | Slot::Aura => true,
     }
 }
 

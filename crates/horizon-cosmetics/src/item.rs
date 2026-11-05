@@ -33,6 +33,20 @@ pub enum Slot {
     /// A name tag style: no model, a square mark drawn before the player's
     /// name and a line under it (`Item::tag`).
     NameTag,
+    /// A small creature or object floating beside the player (`Item::companion`): on no bone,
+    /// so it goes with a shoulder pet.
+    Companion,
+    /// Particles left behind while the player moves (`Item::trail`): no model.
+    Trail,
+    /// A see-through model around the feet or the body (`Item::aura`).
+    Aura,
+}
+
+impl Slot {
+    /// A trail or an aura: what "Hide other players' trails and auras" hides.
+    pub fn is_effect(self) -> bool {
+        matches!(self, Slot::Trail | Slot::Aura)
+    }
 }
 
 /// The part of the player model an item follows.
@@ -158,9 +172,16 @@ pub struct Item {
     pub limbs: Vec<(Bone, Part)>,
     /// A name tag's line (`Slot::NameTag` only; it has no parts).
     pub tag: Option<Tag>,
+    /// How a companion floats and follows (`Slot::Companion` only).
+    pub companion: Option<crate::Companion>,
+    /// What a trail leaves (`Slot::Trail` only; it has no parts).
+    pub trail: Option<crate::Trail>,
+    /// How an aura shows (`Slot::Aura` only).
+    pub aura: Option<crate::Aura>,
     /// How high the item gets above the player model's neck (the head's and body's pivot), in
     /// pixels: its highest vertex with every bone at rest (`Bone::rest`), animations included.
-    /// The game lifts its wearer's name tag over it. 0 for a name tag style (no model).
+    /// The game lifts its wearer's name tag over it. 0 for a name tag style (no model) and for
+    /// the kinds on no bone (a companion, a trail, an aura).
     pub top: f32,
 }
 
@@ -201,7 +222,7 @@ struct ItemFile {
     id: String,
     slot: Slot,
     #[serde(default)]
-    bone: Bone,
+    bone: Option<Bone>,
     #[serde(default)]
     attach: AttachFile,
     texture: TextureFile,
@@ -210,6 +231,12 @@ struct ItemFile {
     animations: Vec<Animation>,
     #[serde(default)]
     tag: Option<TagFile>,
+    #[serde(default)]
+    companion: Option<crate::fx::CompanionFile>,
+    #[serde(default)]
+    trail: Option<crate::fx::TrailFile>,
+    #[serde(default)]
+    aura: Option<crate::fx::AuraFile>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +360,33 @@ impl Item {
             (_, Some(_)) => return Err(invalid("only a name tag has a tag")),
             (_, None) => None,
         };
+        let on_bone = !matches!(file.slot, Slot::Companion | Slot::Trail | Slot::Aura);
+        if !on_bone && file.bone.is_some() {
+            return Err(invalid("a companion, a trail or an aura rides no bone"));
+        }
+        let trail = match (file.slot, file.trail) {
+            (Slot::Trail, Some(t)) => {
+                if !file.parts.is_empty() || !file.animations.is_empty() {
+                    return Err(invalid("a trail has no parts or animations"));
+                }
+                Some(t.check(texture.width, texture.height)?)
+            }
+            (Slot::Trail, None) => return Err(invalid("a trail needs its trail")),
+            (_, Some(_)) => return Err(invalid("only a trail has a trail")),
+            (_, None) => None,
+        };
+        if file.slot == Slot::Companion && file.companion.is_none() {
+            return Err(invalid("a companion needs its companion"));
+        }
+        if file.slot == Slot::Aura && file.aura.is_none() {
+            return Err(invalid("an aura needs its aura"));
+        }
+        if (file.slot != Slot::Companion && file.companion.is_some())
+            || (file.slot != Slot::Aura && file.aura.is_some())
+        {
+            return Err(invalid("only a companion has a companion, an aura an aura"));
+        }
+        let bone = file.bone.unwrap_or_default();
         let a = &file.attach;
         finite(&a.offset, "attach.offset")?;
         finite(&a.rotation, "attach.rotation")?;
@@ -357,7 +411,10 @@ impl Item {
         let mut limbs: Vec<(Bone, Part)> = Vec::new();
         for p in &file.parts {
             let part = bake(p, size, &mut names, true)?;
-            match p.bone.filter(|b| *b != file.bone) {
+            if !on_bone && p.bone.is_some() {
+                return Err(invalid(format!("{:?} rides no bone: no part does", p.name)));
+            }
+            match p.bone.filter(|b| *b != bone) {
                 None => children.push(part),
                 Some(bone) => match limbs.iter_mut().find(|(b, _)| *b == bone) {
                     Some((_, limb)) => limb.children.push(part),
@@ -409,7 +466,7 @@ impl Item {
         let item = Item {
             id: file.id,
             slot: file.slot,
-            bone: file.bone,
+            bone,
             root,
             texture,
             animations: file.animations,
@@ -417,12 +474,27 @@ impl Item {
             limbs,
             tag,
             top: 0.0,
+            companion: None,
+            trail,
+            aura: None,
         };
-        let (reach, top) = item.extent();
-        if reach > MAX_REACH {
-            return Err(Error::TooFar(reach));
-        }
-        Ok(Item { top, ..item })
+        let extent = item.extent();
+        let companion = match file.companion {
+            Some(c) => Some(c.check(&names, extent.reach)?),
+            None if extent.reach > MAX_REACH => return Err(Error::TooFar(extent.reach)),
+            None => None,
+        };
+        let aura = match file.aura {
+            Some(a) => Some(a.check(extent.low, extent.high)?),
+            None => None,
+        };
+        let top = if on_bone { extent.top } else { 0.0 };
+        Ok(Item {
+            top,
+            companion,
+            aura,
+            ..item
+        })
     }
 
     /// The item's roots and the bone each rides: `root` on `bone`, then the `limbs`.
@@ -430,15 +502,17 @@ impl Item {
         std::iter::once((self.bone, &self.root)).chain(self.limbs.iter().map(|(b, p)| (*b, p)))
     }
 
-    /// The farthest any vertex gets from its bone's pivot, and the highest above the neck with
-    /// the bones at rest (pixels, `top`): at rest, and at 32 points of each animation's period.
-    fn extent(&self) -> (f32, f32) {
+    /// The farthest any vertex gets from its bone's pivot, the highest above the neck with the
+    /// bones at rest, and the box around every vertex in the root's space (pixels): at rest, and
+    /// at 32 points of each animation's period.
+    fn extent(&self) -> Extent {
         let mut times = vec![0.0];
         for anim in &self.animations {
             times.extend((0..32).map(|k| anim.period * k as f32 / 32.0));
         }
         let mut far = 0.0_f32;
         let mut top = 0.0_f32;
+        let (mut low, mut high) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
         let mut poses = std::collections::HashMap::new();
         for ticks in times {
             poses.clear();
@@ -451,10 +525,20 @@ impl Item {
                     far = far.max(p.length() * 16.0);
                     // y points down.
                     top = top.max(-(pivot.y + p.y * 16.0));
+                    low = low.min(p * 16.0);
+                    high = high.max(p * 16.0);
                 });
             }
         }
-        (far, top)
+        if low.x > high.x {
+            (low, high) = (glam::Vec3::ZERO, glam::Vec3::ZERO);
+        }
+        Extent {
+            reach: far,
+            top,
+            low,
+            high,
+        }
     }
 
     /// The animated parts' poses at `ticks` (game ticks, any start): each
@@ -489,6 +573,14 @@ impl Item {
             set(&anim.part, pose);
         }
     }
+}
+
+/// What `Item::extent` finds (pixels).
+struct Extent {
+    reach: f32,
+    top: f32,
+    low: glam::Vec3,
+    high: glam::Vec3,
 }
 
 /// Every vertex of `part`'s subtree under `parent`, as posed by `poses`
