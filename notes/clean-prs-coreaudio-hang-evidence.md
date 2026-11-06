@@ -1,7 +1,7 @@
 # EVIDENCE: which clean open PRs would run the sound-device test that hung locally
 
 > **EVIDENCE / investigation note. Not an application fix and not a proposal.** Written by Ian Worley's AI agent
-> (Claude Code, Opus 5.5) at Ian's request, published only to the fork `IanWorley/horizon`. Nothing was written to
+> via T3 Code at Ian's request, published only to the fork `IanWorley/horizon`. Nothing was written to
 > `horizon-rust/horizon` (no push, PR, issue or comment).
 
 - Snapshot taken: **2026-11-06 14:11 CST** (America/Chicago).
@@ -131,14 +131,66 @@ is `git merge-base <head> 41f822b6`, which is what `pr_ready.py` diffs against (
   `actions/checkout` then defaults to GitHub's merge ref (`refs/pull/<n>/merge`), so CI tests the PR merged into the
   base of that moment. This is GitHub/`actions/checkout` default behaviour, not a rule in this repository. Because the
   test reached main on 2026-10-29 (§7) and every merge base here already contains it, CI's tree contains it either way.
-- Other PR jobs: `launcher` (its own workspace, `rust_changes.py --launcher`, [`.github/workflows/ci.yml:121-161`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/ci.yml#L121-L161)) and
-  `parity-scope`/`parity` (harness paths or labels, Mac mini runner, [`.github/workflows/ci.yml:260-294`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/ci.yml#L260-L294)) do
-  not run render's unit tests. `windows-arm64` and `vanilla-parity` are `workflow_dispatch` only. The other workflow
-  files in `.github/workflows/` (cargo-horizon-mod, game-build, launcher, mod-registry, native-hook-stamp, overlap-note,
-  pr-labels, run-parity, …) were not traced test by test. Only `checks / verify` runs `cargo test --workspace`.
+- The other jobs in `ci.yml` don't run render's tests either:
+  - `launcher` builds its own workspace ([`.github/workflows/ci.yml:121-161`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/ci.yml#L121-L161));
+  - `parity-scope`/`parity` run harnesses ([`.github/workflows/ci.yml:260-294`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/ci.yml#L260-L294); see §3.3);
+  - `windows-arm64` and `vanilla-parity` are `workflow_dispatch` only.
 - Observed: the latest `verify` check-run on **every** one of the 114 primary heads (and on #10194/#10195) has
   conclusion `success` (`gh api repos/horizon-rust/horizon/commits/<head>/check-runs`). This shows that a Linux run
   finished on each head. It does not tell us anything about macOS.
+
+### 3.3 Audit of every file in `.github/workflows/` (21 files, text only)
+
+I checked each file's `on:` block and every `cargo`, `uses: ./…` and `run: python3/bash tools/…` line, then followed
+the scripts that PR-triggered jobs call. Eight files have a `pull_request` or `pull_request_target` trigger:
+
+| Workflow | PR trigger | Runner OS | How tests are run | Runs render's lib tests? |
+|---|---|---|---|---|
+| `ci.yml` (`checks`) | `pull_request` [opened, synchronize, reopened] | Linux | `verify`: direct `cargo +stable test --workspace --lib --bins --tests` (§3.2). `launcher`: `cargo test` in `launcher/`. `parity`: reusable `parity.yml` | **Yes, only in `verify`, on Linux** |
+| `run-parity.yml` | `pull_request` [labeled, synchronize]; job only on the `run-parity` label ([L6-30](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/run-parity.yml#L6-L30)) | via `parity.yml` | reusable `parity.yml` | No (see below) |
+| `mod-registry.yml` | `pull_request`, paths `crates/horizon-mods/**`, `crates/horizon-mod-registry/**`, the workflow | Linux (`horizon-checks` or `ubuntu-latest`) | direct `cargo +stable test --locked` in `crates/horizon-mod-registry` ([L28](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/mod-registry.yml#L28), [L40](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/mod-registry.yml#L40)) | No: separate `[workspace]` ([`Cargo.toml:11`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/crates/horizon-mod-registry/Cargo.toml#L11)), no `horizon-client*` dependency |
+| `telemetry-server.yml` | `pull_request`, paths `crates/horizon-telemetry/**`, `crates/horizon-telemetry-server/**`, the workflow | Linux | direct `cargo +stable test --locked` in `crates/horizon-telemetry-server` ([L28](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/telemetry-server.yml#L28), [L40](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/telemetry-server.yml#L40)) | No: separate `[workspace]` ([`Cargo.toml:11`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/crates/horizon-telemetry-server/Cargo.toml#L11)), no `horizon-client*` dependency |
+| `cargo-horizon-mod.yml` | `pull_request`, paths `crates/cargo-horizon-mod/**`, `tools/horizon_mod_binstall.py`, the workflow | Linux, Windows, **`macos-latest`** (`PLATFORMS`, [`tools/horizon_mod_binstall.py:19-25`](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/tools/horizon_mod_binstall.py#L19-L25)) | **no `cargo test`**: `cargo build --release --locked -p cargo-horizon-mod` and starts the binary ([L49-61](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/cargo-horizon-mod.yml#L49-L61)) | No: no tests, and `cargo-horizon-mod`'s only path dependency is `horizon-mods` |
+| `cancel-on-close.yml` | `pull_request_target` [closed] | Linux | `gh run cancel` loop, no cargo | No |
+| `overlap-note.yml` | `pull_request_target` | Linux | `python3 tools/ci/overlap_note.py event`, no cargo | No |
+| `pr-labels.yml` | `pull_request_target` | Linux | `python3 tools/ci/pr_labels.py event`, no cargo | No |
+
+**`parity.yml`**, the reusable workflow behind `ci.yml`'s `parity` job and `run-parity.yml`, is the only PR path that
+can reach a Mac. Its runner is `["self-hosted","horizon-game"]`, which includes the Mac mini ([L36-40](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/parity.yml#L36-L40);
+`docs/ci-runners.md`). It runs no direct `cargo test`. Its steps are `runner-env.sh`, `vanilla-data.sh` (which only
+does `cargo build --release --locked -p horizon-prepare`), `prepare_output.py`, `gen_version_consts.py`, and
+`tools/parity.py --changed` ([L74-101](https://github.com/horizon-rust/horizon/blob/41f822b659789780f58d32c63ddfb6887ea1b8bf/.github/workflows/parity.yml#L74-L101)).
+`parity.py` itself builds probes with `cargo build` (`tools/parity.py:663`).
+
+Some harness scripts do call `cargo test` themselves, but always on other crates' `--lib` targets with a test-name
+filter:
+- `-p horizon-client --lib` or `-p horizon-client-lib --lib` (breeze_hook, client_arrow, damage_catalog,
+  dragon_contacts, dragon_render, fishing_rng, happy_ghast_leash, lan_auth, map_saved_data, mob_air, mob_fall_reset,
+  mount_control, opened_loot, raider_celebration, shulker_space, villager_farming);
+- `-p horizon-protocol --lib` (server_address).
+
+**None passes `-p horizon-client-render` or `--workspace`.** `--lib` on `horizon-client` or `horizon-client-lib`
+builds render as a dependency but never runs render's lib test binary, which is the only binary that contains this
+test (§5). Other text hits were checked and excluded:
+- `tools/test_launcher_macos_update.py` tests a temporary `Cargo.toml` it writes itself;
+- `tests/test_pr_ready.py` only asserts command strings;
+- `tools/gate.py` (`cargo test --workspace`) is run only by the local `tools/supervise.py`; no workflow calls it, and
+  `tools/parity.py` only names it in comments and messages.
+
+The remaining 13 files have no PR trigger:
+- `claim-command`, `nightly-command`, `triage-command`: `issue_comment`;
+- `mojang-republish`, `nightly`, `nightly-build`, `release`: schedule, `workflow_run` or dispatch;
+- `launcher`, `native-hook-stamp`, `pack-bench`, `parity-main`: push or dispatch;
+- `game-build`: `workflow_call` from `nightly-build`.
+
+Two of these can run on macOS, but neither is triggered by a PR or runs `cargo test`:
+- `game-build` builds on Mac runners plus a 1500-frame smoke run;
+- `nightly` and `parity-main` run harnesses.
+
+`launcher.yml`'s `cargo test` is the launcher workspace, triggered by push or schedule.
+
+**Outcome:** no PR-triggered workflow other than `ci.yml`'s `verify` job (Linux) runs `horizon-client-render`'s lib
+tests, and none runs them on macOS.
 
 ## 4. What the test does, and when it reaches a real audio backend
 
@@ -224,14 +276,16 @@ compiled with `audio`. Both PRs are `unstable` today. Their latest `verify` (Lin
 
 ## 7. When the test arrived (dating)
 
-- Introduced in commit `48e731483a9762a1c44b0bf51a50dfd5ed76d4fe` (2026-10-29 00:42 +0530, "options: choose the audio
+- Introduced in commit `48e731483a9762a1c44b0bf51a50dfd5ed76d4fe` (2026-10-28 14:12 CDT, "options: choose the audio
   output device in Music & Sounds (#1035)"), in `crates/horizon-client/src/options_ui.rs`, together with
   `audio::output_devices()` and its `HORIZON_NO_AUDIO` early return.
-- `horizon-client-render` was created by `a7efe597ea83e093fb816f22c93d6bd454fb5293` (2026-10-28 13:23 +0100).
+- `horizon-client-render` was created by `a7efe597ea83e093fb816f22c93d6bd454fb5293` (2026-10-28 07:23 CDT).
 - On main's first-parent history, render's `options_ui.rs` first contains the test at merge
-  `909396071965b11de127fdcbf78e1953e8aeaa06` (2026-10-29 23:37 +0500, "Merge pull request #3355 from
-  Sticky-Bug/feat/audio-output-device"). Its first parent `c7065027b` lacks it. This was found by bisecting
-  first-parent main (it assumes the test was never removed and re-added).
+  `909396071965b11de127fdcbf78e1953e8aeaa06` (2026-10-29 13:37 CDT, "Merge pull request #3355 from
+  Sticky-Bug/feat/audio-output-device"). Its first parent `c7065027b` (2026-10-29 12:52 CDT) lacks it. This was found
+  by bisecting first-parent main (it assumes the test was never removed and re-added).
+- All times are git author dates converted to America/Chicago with
+  `TZ=America/Chicago git log --date=format-local:'%Y-%m-%d %H:%M %Z'`.
 - Every merge base (and every API base SHA) of the 197 clean+unstable heads descends
   from `909396071`. Every head's render `options_ui.rs` contains the test, none has it under
   `crates/horizon-client/src/options_ui.rs`, and the function text hashes the same as main's (`1427743e86ac`).
@@ -294,7 +348,10 @@ tests with `audio` on runs the same code.
 - `mergeable_state` is GitHub's point-in-time computation and can change without a push.
 - The test was dated by a first-parent bisect, not `git log -S` (which failed in this partial clone), and assumes the
   test was not removed and re-added.
-- Workflows other than `ci.yml` were checked only for whether they are PR-triggered `cargo test --workspace` runners.
+- The workflow audit (§3.3) is a text audit of `.github/workflows/*` at `41f822b6` and the scripts PR jobs call. It
+  did not read repository variables or runner labels beyond `docs/ci-runners.md`, and it relies on the PR's merge
+  commit using main's workflow files (a PR that edits a workflow could change its own CI; none of the 114 primary
+  PRs changes a file under `.github/workflows/`).
 
 ## 12. Method (reproducible, read-only)
 
