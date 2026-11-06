@@ -1089,21 +1089,8 @@ impl Opt {
             Opt::HighContrast => s.high_contrast = !s.high_contrast,
             Opt::ShowSubtitles => s.show_subtitles = !s.show_subtitles,
             Opt::SoundDevice => {
-                let devices = crate::audio::output_devices();
-                let mut all = vec![String::new()];
-                for d in devices {
-                    if !all.contains(&d) {
-                        all.push(d);
-                    }
-                }
-                let current_idx = all.iter().position(|d| d == &s.sound_device).unwrap_or(0);
-                let count = all.len();
-                let next_idx = if back {
-                    (current_idx + count - 1) % count
-                } else {
-                    (current_idx + 1) % count
-                };
-                s.sound_device = all[next_idx].clone();
+                s.sound_device =
+                    next_sound_device(crate::audio::output_devices(), &s.sound_device, back);
             }
             Opt::MusicFrequency => {
                 let n = next(s.file.int("musicFrequency").clamp(0, 2) as u8, 3);
@@ -1160,6 +1147,25 @@ impl Opt {
             s.graphics_preset = "custom".into();
         }
     }
+}
+/// The sound device after `current` in the system default ("") followed by
+/// `devices`, wrapping; a device no longer listed counts as the default.
+/// Kept apart from listing the devices so tests never open a real output.
+fn next_sound_device(devices: Vec<String>, current: &str, back: bool) -> String {
+    let mut all = vec![String::new()];
+    for d in devices {
+        if !all.contains(&d) {
+            all.push(d);
+        }
+    }
+    let current_idx = all.iter().position(|d| d == current).unwrap_or(0);
+    let count = all.len();
+    let next_idx = if back {
+        (current_idx + count - 1) % count
+    } else {
+        (current_idx + 1) % count
+    };
+    all[next_idx].clone()
 }
 const PRESETS: [&str; 4] = ["fast", "fancy", "fabulous", "custom"];
 fn preset_index(p: &str) -> usize {
@@ -7601,7 +7607,7 @@ mod tests {
 
     #[test]
     fn sound_device_button_in_sound_page_and_cycles() {
-        let mut s = Settings::default();
+        let s = Settings::default();
         let mut ui = OptionsUi::default();
         ui.show(Page::Sound);
         let rows = ui.list_rows(&s);
@@ -7610,18 +7616,30 @@ mod tests {
             "Sound page should contain Row::Big(Opt::SoundDevice)"
         );
         assert_eq!(s.sound_device, "");
-        let devices = crate::audio::output_devices();
-        let count = 1 + devices.len();
-        // Cycling forward 'count' times wraps around back to the initial selection ("")
-        for _ in 0..count {
-            Opt::SoundDevice.cycle(&mut s, false, [854, 480]);
+        // A fixed list, not the machine's: listing real outputs opens each one and
+        // can block forever in a stuck CoreAudio plugin (#11342).
+        let devices = || {
+            vec![
+                "Speakers".to_owned(),
+                "USB".to_owned(),
+                "Speakers".to_owned(),
+            ]
+        };
+        let mut current = String::new();
+        let mut forward = Vec::new();
+        for _ in 0..3 {
+            current = next_sound_device(devices(), &current, false);
+            forward.push(current.clone());
         }
-        assert_eq!(s.sound_device, "");
-        // Cycling backward 'count' times also wraps around back to ""
-        for _ in 0..count {
-            Opt::SoundDevice.cycle(&mut s, true, [854, 480]);
+        assert_eq!(forward, ["Speakers", "USB", ""]);
+        let mut backward = Vec::new();
+        for _ in 0..3 {
+            current = next_sound_device(devices(), &current, true);
+            backward.push(current.clone());
         }
-        assert_eq!(s.sound_device, "");
+        assert_eq!(backward, ["USB", "Speakers", ""]);
+        // A device that is gone counts as the default.
+        assert_eq!(next_sound_device(devices(), "Unplugged", false), "Speakers");
     }
 
     #[test]
